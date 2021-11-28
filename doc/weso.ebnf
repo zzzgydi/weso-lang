@@ -1,0 +1,69 @@
+# Grammer for Weso
+
+# 基本类型
+# i8 i16 i32 i64 i128
+# u8 u16 u32 u64 u128
+# f32 f64 bool str null
+# 复合类型
+# array tuple struct
+# 特殊类型
+# fn error any
+
+# 变量/类型定义 - [a]类型仅允许定义一个参数
+type_var: NAME | '[' [type_var] ']' |
+    '(' [type_var_list] ')' |
+    'fn' '(' [type_var_list] ')' '->' type_var
+type_var_list: type_var (',' type_var)*
+
+name_type_list: (NAME ':' type_var ',')* [NAME ':' type_var]
+# 结构体定义
+struct_def: 'struct' NAME '{' name_type_list '}'
+# 函数定义
+func_def: 'fn' NAME '(' name_type_list ')' '->' type_var block
+
+# 语句
+type_stmt: 'type' NAME '=' type_var
+vdef_stmt: ('let' | 'const') NAME [':' type_var] ['=' test]
+expr_stmt: testlist augassign testlist
+augassign: ('=' | ':=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=' | '**=')
+
+# 控制语句
+if_stmt: 'if' test block ('elif' test block)* ['else' block]
+while_stmt: 'while' test block
+for_stmt: 'for' NAME (',' NAME)* 'in' testlist block
+flow_stmt: 'break' | 'continue' | 'return' [testlist]
+
+# 块
+block: '{' stmtlist '}'
+all_stmt: type_stmt | vdef_stmt | expr_stmt | if_stmt | while_stmt | for_stmt | flow_stmt
+stmtlist: (all_stmt ';')*
+
+# 表达式
+testlist: test (',' test)*
+exprlist: expr (',' expr)*
+
+test: or_test ['?' test ':' test]
+or_test: or_test '||' and_test
+and_test: and_test '&&' not_test
+not_test: '!' not_test | comparison
+comparison: comparison comp_op expr
+comp_op: '<' | '>' | '==' | '>=' | '<=' | '!=' | 'in'
+
+expr: xor_expr ('|' xor_expr)*
+xor_expr: and_expr ('^' and_expr)*
+and_expr: shift_expr ('&' shift_expr)*
+shift_expr: arith_expr (('<<'|'>>') arith_expr)*
+arith_expr: term (('+'|'-') term)*
+term: factor (('*'|'/'|'%') factor)*
+factor: ('-'|'~') factor | power
+power: atom_expr ['**' factor]
+atom_expr: atom trailer*
+atom: (
+    NAME | NUMBER | STRING | 'null' | 'true' | 'false' |
+    '(' [testlist] ')' |
+    '[' [testlist] ']' |
+    NAME '@' '{' [obj_maker] '}'
+)
+trailer: '(' [arglist] ')' | '.' NAME
+arglist: testlist
+obj_maker: NAME [':' test] (',' NAME [':' test])*

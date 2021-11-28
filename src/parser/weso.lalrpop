@@ -1,0 +1,623 @@
+use crate::base::ast::{Expression, Statement, StmtList, StatementKind, ExpressionKind};
+use crate::parser::token::LogosToken;
+use crate::base::types::NewTypeKind;
+use crate::parser::liter::Literal;
+use crate::parser::lexer;
+use std::collections::HashMap;
+
+grammar<'input>;
+
+pub weso: StmtList = {
+  <BlockStmt_*>
+};
+
+
+Block: StmtList = {
+  "{" <BlockStmt_*> "}"
+};
+
+BlockStmt_: Statement = {
+  IfStmt,
+  WhileStmt,
+  ForStmt,
+  FuncDefStmt,
+  StructDefStmt,
+  <TypeDefStmt> SeparateSyb,
+  <VarDefStmt> SeparateSyb,
+  <AssignStmt> SeparateSyb,
+  <ExprStmt> SeparateSyb,
+  <FlowStmt> SeparateSyb,
+};
+
+// 语句分开的符号
+SeparateSyb: () = {
+  ";",
+};
+
+// 泛型
+#[inline]
+Comma<T>: Vec<T> = {
+  <v:T> => vec![v],
+  <v:(<T> ",")+> <e:T> ","?=> {
+    let mut v = v;
+    v.push(e);
+    v
+  }
+};
+
+// 泛型
+#[inline]
+CommaMore<T>: Vec<T> = {
+  <v:(<T> ",")+> <e:T?> => match e{
+    None => v,
+    Some(e) => {
+      let mut v = v;
+      v.push(e);
+      v
+    }
+  }
+};
+
+// 类型别名
+TypeDefStmt: Statement = {
+  <location:@L> "type" <left:VarName> "=" <right:TypeValue> => {
+    Statement {
+      location,
+      node: StatementKind::TypeDef {left:left.to_string(), right}
+    }
+  }
+};
+
+// 结构体
+StructDefStmt: Statement = {
+  <location:@L> "struct" <name:VarName> "{"
+  <value:Comma<NamedType_>>
+  "}" => {
+    let mut hm = HashMap::new();
+    for typ in value {
+      hm.insert(typ.0, typ.1);
+    }
+    let st = NewTypeKind::Struct(hm);
+    // 结构体转换成类型赋值
+    Statement {
+      location,
+      node: StatementKind::TypeDef { left:name.to_string(), right:st }
+    }
+  }
+};
+
+// 函数声明
+FuncDefStmt: Statement = {
+  <location:@L> "fn" <name:VarName>
+  "(" <args:Comma<NamedType_>?> ")" 
+  <rettyp:("->" <TypeValue>)?>
+  <block:Block> => {
+    let args = if let Some(v) = args { v } else { vec![] };
+    let rettyp = if let Some(v) = rettyp { v } else { NewTypeKind::name("unit") };
+    Statement {
+      location,
+      node: StatementKind::FuncDef { name:name.to_string(), args, rettyp, block }
+    }
+  }
+};
+
+NamedType_: (String, NewTypeKind) = {
+  <name:VarName> ":" <typ:TypeValue> => (name.to_string(), typ)
+};
+
+// 变量声明
+VarDefStmt: Statement = {
+  <location:@L> 
+  <mutable:VarDefOp> <name:VarName>
+  <typ:(":" <TypeValue>)?>
+  <expr: ("=" <TestExpr>)?> => {
+    let typ = if let Some(t) = typ { t } else { NewTypeKind::name("any") };
+    
+    Statement {
+      location,
+      node: StatementKind::VarDef {
+        mutable,
+        name:name.to_string(),
+        typ,
+        assign:expr
+      }
+    }
+  }
+}
+
+VarDefOp: bool = {
+  "let" => true,
+  "const" => false,
+};
+
+// a = b; a:= b; a+= b;...
+AssignStmt: Statement = {
+  <location:@L> <left:TestExpr> "=" <right:TestExpr> => Statement {
+    location,
+    node: StatementKind::Assign { left, right },
+  },
+  <location:@L> <left:TestExpr> ":=" <right:TestExpr> => Statement {
+    location,
+    node: StatementKind::Move { left, right },
+  },
+  <location:@L> <left:TestExpr> <op:AugAssignOp_> <right:TestExpr> => Statement {
+    location,
+    node: StatementKind::AugAssign { op:op.to_string(), left, right },
+  },
+}
+
+AugAssignOp_: &'static str = {
+  "+=" => "add",
+  "-=" => "sub",
+  "*=" => "mul",
+  "/=" => "div",
+  "%=" => "mod",
+  "&=" => "bitand",
+  "|=" => "bitor",
+  "^=" => "bitxor",
+  "<<=" => "lshift",
+  ">>=" => "rshift",
+  "**=" => "pow",
+};
+
+IfStmt: Statement = {
+  <location:@L> "if" <test:TestExpr>
+  <then:Block>
+  <orelif: ElifStmt_*>
+  <orelse:("else" <Block>)?> => {
+    let mut els: StmtList = if let Some(o) = orelse { o } else {vec![]};
+    let mut orelif: StmtList = orelif;
+    while let Some(mut tmp) = orelif.pop() {
+      tmp._set_elif(els);
+      els = vec![tmp];
+    }
+    Statement { 
+      location,
+      node: StatementKind::If { test, then, orelse: els }
+    }
+  }
+};
+
+ElifStmt_: Statement = {
+  <location:@L> "elif" <test:TestExpr>
+  <then:Block> => Statement {
+    location,
+    node: StatementKind::If { test, then, orelse:vec![] }
+  }
+};
+
+WhileStmt: Statement = {
+  <location:@L> "while" <test:TestExpr>
+  <then:Block> => Statement { 
+    location,
+    node: StatementKind::While { test, then }
+  }
+};
+
+ForStmt: Statement = {
+  <location:@L> "for" <name:VarName> "in" <iter:TestExpr>
+  <then:Block> => Statement {
+    location,
+    node: StatementKind::For { name: name.to_string(), iter, then },
+  }
+};
+
+FlowStmt: Statement = {
+  <location:@L> "break" => Statement {
+    location,
+    node: StatementKind::Break,
+  },
+  <location:@L> "continue" => Statement {
+    location,
+    node: StatementKind::Continue,
+  },
+  <location:@L> "return" <value:TestExpr> => Statement {
+    location,
+    node: StatementKind::Return { value },
+  }
+};
+
+ExprStmt: Statement = {
+  <location:@L> <expr:TestExpr> => Statement {
+    location,
+    node: StatementKind::Expression { expr },
+  }
+};
+
+// 
+TestExpr: Box<Expression> = {
+  OrTest,
+  <location:@L> <test:OrTest> "?" <then:TestExpr> ":" <orelse:TestExpr> => 
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Question { test, then, orelse },
+    })
+};
+
+OrTest: Box<Expression> = {
+  AndTest,
+  <location:@L> <left:OrTest> "||" <right:AndTest> =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Or{ left, right },
+    })
+};
+
+AndTest: Box<Expression> = {
+  NotTest,
+  <location:@L> <left:AndTest> "&&" <right:NotTest> =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::And{ left, right },
+    })
+};
+
+NotTest: Box<Expression> = {
+  Comparison,
+  <location:@L> "!" <expr:NotTest> => Box::new(Expression {
+    location,
+    node: ExpressionKind::Not{ expr },
+  })
+};
+
+Comparison: Box<Expression> = {
+  Expr,
+  <location:@L> <left:Comparison> <callee:CompOp> <right:Expr> =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![ left, right] },
+    })
+};
+
+CompOp: Box<Expression> = {
+  <location:@L> <s:CompOp_> =>
+  Box::new(Expression {location, node: ExpressionKind::Ident{ value: s.to_string() }})
+};
+
+CompOp_: &'static str = {
+  ">" => "gt",
+  ">=" => "geq",
+  "<" => "lt",
+  "<=" => "leq",
+  "==" => "equal",
+  "!=" => "noteq",
+  "in" => "inside",
+};
+
+Expr: Box<Expression> = {
+  XorExpr,
+  <location:@L> <left:Expr> 
+  <location1:@L> "|" <right:XorExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value:"bitor".to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+XorExpr: Box<Expression> = {
+  AndExpr,
+  <location:@L> <left:XorExpr> 
+  <location1:@L> "^" <right:AndExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value:"bitxor".to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+AndExpr: Box<Expression> = {
+  ShiftExpr,
+  <location:@L> <left:AndExpr> 
+  <location1:@L> "&" <right:ShiftExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value: "bitand".to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+ShiftExpr: Box<Expression> = {
+  ArithExpr,
+  <location:@L> <left:ShiftExpr> 
+  <location1:@L> <s:ShiftOp_> <right:ArithExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value: s.to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+ShiftOp_: &'static str = {
+  "<<" => "lshift",
+  ">>" => "rshift",
+};
+
+ArithExpr: Box<Expression> = {
+  TermExpr,
+  <location:@L> <left:ArithExpr> 
+  <location1:@L> <s:ArithOp_> <right:TermExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value: s.to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+ArithOp_: &'static str= {
+  "+" => "add",
+  "-" => "sub",
+};
+
+TermExpr: Box<Expression> = {
+  FactorExpr,
+  <location:@L> <left:TermExpr> 
+  <location1:@L> <s:TermOp_> <right:FactorExpr> => {
+    let callee = Box::new(Expression {
+      location: location1,
+      node: ExpressionKind::Ident{ value: s.to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left, right] },
+    })
+  }
+};
+
+TermOp_: &'static str = {
+  "*" => "mul",
+  "/" => "div",
+  "%" => "mod",
+  "**" => "pow",
+};
+
+FactorExpr: Box<Expression> = {
+  AtomExpr,
+  <location:@L> <s:FactorOp_> <left:FactorExpr>  => {
+    let callee = Box::new(Expression {
+      location: location,
+      node: ExpressionKind::Ident{ value: s.to_string() },
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args: vec![left] },
+    })
+  }
+};
+
+FactorOp_: &'static str=  {
+  "-" => "neg",
+  "~" => "bitnot",
+};
+
+AtomExpr: Box<Expression> = {
+  Atom,
+  // 函数调用
+  <location:@L> <callee:AtomExpr> "(" <args:Comma<TestExpr>?> ")" => {
+    let args = if let Some(a) = args {a} else {vec![]};
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args }
+    })
+  },
+  // 属性取值
+  <location:@L> <left:AtomExpr> "." <right:Atom> =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Dot { left, right }
+    }),
+  // 属性取值
+  <location:@L> <left:AtomExpr> "[" <right:TestExpr> "]" =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Dot { left, right }
+    }),
+};
+
+Atom: Box<Expression> = {
+  "(" <TestExpr> ")" => <>,
+  <location:@L> "(" ")" => Box::new(Expression {
+    location,
+    node: ExpressionKind::Liter { value: Literal::Unit }
+  }),
+  <location:@L> "(" <args:CommaMore<TestExpr>> ")" => Box::new(Expression {
+    location,
+    node: ExpressionKind::Call { 
+      callee: Box::new(Expression {
+        location,
+        node: ExpressionKind::Ident { value: "tuple".to_string() }
+      }),
+      args
+    }
+  }),
+  <location:@L> "[" <v:Comma<TestExpr>?> "]" => {
+    let args = if let Some(v_) = v {v_} else {vec![]};
+    let callee = Box::new(Expression{
+      location,
+      node: ExpressionKind::Ident { value: "array".to_string() }
+    });
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Call { callee, args }
+    })
+  },
+  <location:@L> <name:VarName> "@" "{" <args:Comma<NamedValue>> "}" =>
+    Box::new(Expression {
+      location,
+      node: ExpressionKind::Struct { name:name.to_string(), args }
+    }),
+  <location:@L> <name:VarName> => Box::new(Expression {
+    location,
+    node: ExpressionKind::Ident { value: name.to_string() }
+  }),
+  <location:@L> <value:Literal_> => Box::new(Expression {
+    location,
+    node: ExpressionKind::Liter{ value }
+  })
+};
+
+NamedValue: (String, Box<Expression>) = {
+  <name:VarName> ":" <expr:TestExpr> => (name.to_string(), expr)
+};
+
+Literal_: Literal = {
+  "true" => Literal::True,
+  "false" => Literal::False,
+  "null" => Literal::Null,
+  LiteralInt => Literal::Integer(<>.to_string()),
+  LiteralFloat => Literal::Float(<>.to_string()),
+  LiteralString => Literal::String(<>.to_string()),
+};
+
+// 变量类型值
+TypeValue: NewTypeKind = {
+  // "i8" => TypeToken::Int8,
+  // "i16" => TypeToken::Int16,
+  // "i32" => TypeToken::Int32,
+  // "i64" => TypeToken::Int64,
+  // "i128" => TypeToken::Int128,
+  // "u8" => TypeToken::Uint8,
+  // "u16" => TypeToken::Uint16,
+  // "u32" => TypeToken::Uint32,
+  // "u64" => TypeToken::Uint64,
+  // "u128" => TypeToken::Uint128,
+  // "f32" => TypeToken::Float32,
+  // "f64" => TypeToken::Float64,
+  // "bool" => TypeToken::Bool,
+  // "str" => TypeToken::Str,
+  // // "null" => TypeToken::Null,
+  // "unit" => TypeToken::Unit,
+  // "any" => TypeToken::Any,
+  "[" <v:TypeValue?> "]" => match v {
+    Some(t) => NewTypeKind::Array(Box::new(t)),
+    None => NewTypeKind::Array(Box::new(NewTypeKind::name("any"))),
+  },
+  "(" <v:Comma<TypeValue>> ")" => {
+    if v.len() < 1 {
+      NewTypeKind::name("unit")
+    } else {
+      NewTypeKind::Tuple(v)
+    }
+  },
+  VarName => NewTypeKind::name(<>),
+};
+
+// 外部Lexer
+extern {
+  type Location = lexer::Location;
+  type Error = lexer::LexerError;
+
+  enum LogosToken<'input> {
+    "fn" => LogosToken::Func,
+    "type" => LogosToken::Type,
+    "struct" => LogosToken::Struct,
+    "let" => LogosToken::Let,
+    "const" => LogosToken::Const,
+    "if" => LogosToken::If,
+    "elif" => LogosToken::Elif,
+    "else" => LogosToken::Else,
+    "while" => LogosToken::While,
+    "for" => LogosToken::For,
+    "in" => LogosToken::In,
+    "break" => LogosToken::Break,
+    "continue" => LogosToken::Continue,
+    "return" => LogosToken::Return,
+
+    // "i8" => LogosToken::Int8,
+    // "i16" => LogosToken::Int16,
+    // "i32" => LogosToken::Int32,
+    // "i64" => LogosToken::Int64,
+    // "i128" => LogosToken::Int128,
+    // "u8" => LogosToken::Uint8,
+    // "u16" => LogosToken::Uint64,
+    // "u32" => LogosToken::Uint32,
+    // "u64" => LogosToken::Uint64,
+    // "u128" => LogosToken::Uint128,
+    // "f32" => LogosToken::Float32,
+    // "f64" => LogosToken::Float64,
+    // "bool" => LogosToken::Bool,
+    // "str" => LogosToken::Str,
+    "null" => LogosToken::Null,
+    "unit" => LogosToken::Unit,
+    "true" => LogosToken::True,
+    "false" => LogosToken::False,
+    // "any" => LogosToken::Any,
+    // "array" => LogosToken::Array,
+    // "tuple" => LogosToken::Tuple,
+    
+    "||" => LogosToken::Or,
+    "&&" => LogosToken::And,
+    "!" => LogosToken::Not,
+    "+" => LogosToken::Add,
+    "-" => LogosToken::Sub,
+    "*" => LogosToken::Mul,
+    "/" => LogosToken::Div,
+    "%" => LogosToken::Mod,
+    "**" => LogosToken::Pow,
+    ">" => LogosToken::Gt,
+    "<" => LogosToken::Lt,
+    ">=" => LogosToken::Geq,
+    "<=" => LogosToken::Leq,
+    "!=" => LogosToken::Noteq,
+    "==" => LogosToken::Equal,
+    "|" => LogosToken::BitOr,
+    "&" => LogosToken::BitAnd,
+    "^" => LogosToken::BitXor,
+    "~" => LogosToken::BitNot,
+    ">>" => LogosToken::Rshift,
+    "<<" => LogosToken::Lshift,
+    ":=" => LogosToken::Move,
+    "+=" => LogosToken::AddAssign,
+    "-=" => LogosToken::SubAssign,
+    "*=" => LogosToken::MulAssign,
+    "/=" => LogosToken::DivAssign,
+    "%=" => LogosToken::ModAssign,
+    "|=" => LogosToken::BitOrAssign,
+    "&=" => LogosToken::BitAndAssign,
+    "^=" => LogosToken::BitXorAssign,
+    "<<=" => LogosToken::LshiftAssign,
+    ">>=" => LogosToken::RshiftAssign,
+    "**=" => LogosToken::PowAssign,
+
+    "." => LogosToken::Dot,
+    "=" => LogosToken::Assign,
+    "@" => LogosToken::At,
+    ";" => LogosToken::Semi,
+    ":" => LogosToken::Colon,
+    "->" => LogosToken::Arrow,
+    "," => LogosToken::Comma,
+    "?" => LogosToken::Question,
+    "(" => LogosToken::Lpar,
+    ")" => LogosToken::Rpar,
+    "[" => LogosToken::Lsqb,
+    "]" => LogosToken::Rsqb,
+    "{" => LogosToken::Lbrace,
+    "}" => LogosToken::Rbrace,
+
+    LiteralInt => LogosToken::Integer(<&'input str>),
+    LiteralFloat => LogosToken::Float(<&'input str>),
+    LiteralString => LogosToken::String(<&'input str>),
+
+    VarName => LogosToken::VarName(<&'input str>),
+  }
+}

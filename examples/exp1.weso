@@ -1,0 +1,45 @@
+let a = true;
+let b = false;
+let c = 1 * 1000;
+let d:f64 = 2.0 / 10;
+println(c, d);
+
+fn test(arg: i32) {
+    println(arg);
+
+    if arg < 1 {
+        println("big than 5");
+        return 1;
+    } else {
+        println("test:" + arg);
+        return test(arg - 1);
+    }
+}
+let tt = test(5);
+
+println("tt is", tt);
+
+let string = "123";
+
+let num: i128 = 10;
+
+num = string;
+
+string = "123005404004";
+
+println(string, num);
+
+let i = 0;
+
+while i <= 20 {
+    println(i);
+    i += 1;
+}
+
+if a {
+    if b {
+        let e = 1;
+    } else {
+        print(1 == 1);
+    }
+}
